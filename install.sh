@@ -7,11 +7,17 @@ DIR="${DIR:-"$HOME/.local/bin"}"
 ARCH=$(uname -m)
 case $ARCH in
     i386|i686) ARCH=x86_64 ;;
-    aarch64*) ARCH=aarch64 ;;
+    aarch64*|arm64) ARCH=aarch64 ;;
 esac
 
 # prepare the download URL
-GITHUB_LATEST_VERSION=$(curl -L -s -H 'Accept: application/json' https://github.com/rgwood/systemctl-tui/releases/latest | sed -e 's/.*"tag_name":"\([^"]*\)".*/\1/')
+# Resolve the tag from the release redirect URL to avoid GitHub API rate limits
+GITHUB_LATEST_VERSION=$(curl -fsSL -o /dev/null -w "%{url_effective}" https://github.com/rgwood/systemctl-tui/releases/latest | sed 's|.*/tag/||')
+
+# Fallback to GitHub API if redirect resolution does not yield a tag
+if [ -z "$GITHUB_LATEST_VERSION" ] || [ "$GITHUB_LATEST_VERSION" = "latest" ]; then
+    GITHUB_LATEST_VERSION=$(curl -sL https://api.github.com/repos/rgwood/systemctl-tui/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+fi
 GITHUB_FILE="systemctl-tui-${ARCH}-unknown-linux-musl.tar.gz"
 GITHUB_URL="https://github.com/rgwood/systemctl-tui/releases/download/${GITHUB_LATEST_VERSION}/${GITHUB_FILE}"
 
