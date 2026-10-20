@@ -47,6 +47,7 @@ pub enum Mode {
   StatusFilter,
   UnitExplanation,
   CommandPalette,
+  LogSearch,
 }
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -310,6 +311,8 @@ pub struct Home {
   /// Screen rect of the clickable description in the details pane, as of the most recent render.
   /// `Some` only when the selected unit has a baked-in explanation.
   pub explanation_button_rect: Option<Rect>,
+  pub log_search_input: Input,
+  pub log_search_panel: Rect,
 }
 
 pub struct MenuItem {
@@ -453,9 +456,21 @@ impl Home {
   }
 
   fn logs_for_pager(&self) -> Vec<String> {
-    match self.log_order {
-      LogOrder::NewestFirst => self.logs.iter().rev().map(LogEntry::to_plain_string).collect(),
-      LogOrder::OldestFirst => self.logs.iter().map(LogEntry::to_plain_string).collect(),
+    let query = self.log_search_input.value().trim().to_lowercase();
+    let entries: Box<dyn Iterator<Item = &LogEntry>> = match self.log_order {
+      LogOrder::NewestFirst => Box::new(self.logs.iter().rev()),
+      LogOrder::OldestFirst => Box::new(self.logs.iter()),
+    };
+    if query.is_empty() {
+      entries.map(LogEntry::to_plain_string).collect()
+    } else {
+      entries
+        .filter(|e| {
+          e.content.to_lowercase().contains(&query)
+            || e.timestamp.as_deref().unwrap_or("").to_lowercase().contains(&query)
+        })
+        .map(LogEntry::to_plain_string)
+        .collect()
     }
   }
 
@@ -591,6 +606,7 @@ impl Home {
 
     commands.extend([
       CommandItem::new("Search units", "Units", "Ctrl+F or /", vec![Action::EnterMode(Mode::Search)]),
+      CommandItem::new("Filter / search logs", "Logs", "s or Ctrl+S", vec![Action::EnterMode(Mode::LogSearch)]),
       CommandItem::new("Filter units", "Units", "F2", vec![Action::EnterMode(Mode::StatusFilter)]),
       CommandItem::new("Refresh units", "Units", "", vec![Action::RefreshServices, Action::RefreshUnitFiles]),
       CommandItem::new("Reverse log order", "Logs", "Ctrl+R", vec![Action::ToggleLogOrder, Action::Render]),
@@ -1217,7 +1233,7 @@ impl Component for Home {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
       return match self.mode {
         Mode::CommandPalette => vec![Action::EnterMode(self.command_palette_return_mode)],
-        Mode::Search | Mode::ServiceList => vec![Action::EnterMode(Mode::CommandPalette)],
+        Mode::Search | Mode::ServiceList | Mode::LogSearch => vec![Action::EnterMode(Mode::CommandPalette)],
         _ => vec![],
       };
     }
@@ -1251,6 +1267,7 @@ impl Component for Home {
         KeyCode::Char('c') => return vec![Action::Quit],
         KeyCode::Char('q') => return vec![Action::Quit],
         KeyCode::Char('f') => return vec![Action::EnterMode(Mode::Search)],
+        KeyCode::Char('s') => return vec![Action::EnterMode(Mode::LogSearch)],
         KeyCode::Char('l') => return vec![Action::ToggleShowLogger],
         KeyCode::Char('r') => return vec![Action::ToggleLogOrder, Action::Render],
         // vim-style half-page scrolling
@@ -1283,6 +1300,12 @@ impl Component for Home {
             self.clear_logs_selection();
             vec![Action::Render]
           },
+          KeyCode::Esc if !self.log_search_input.value().is_empty() => {
+            self.log_search_input = Input::default();
+            self.logs_scroll_offset = 0;
+            vec![Action::Render]
+          },
+          KeyCode::Char('s') => vec![Action::EnterMode(Mode::LogSearch)],
           KeyCode::Char('q') => vec![Action::Quit],
           KeyCode::Up | KeyCode::Char('k') => {
             // if we're filtering the list, and we're at the top, and there's text in the search box, go to search mode
@@ -1456,6 +1479,29 @@ impl Component for Home {
           vec![]
         },
       },
+      Mode::LogSearch => match key.code {
+        KeyCode::Esc => {
+          self.log_search_input = Input::default();
+          self.logs_scroll_offset = 0;
+          vec![Action::EnterMode(Mode::ServiceList)]
+        },
+        KeyCode::Enter => vec![Action::EnterMode(Mode::ServiceList)],
+        KeyCode::Up => vec![Action::ScrollUp(2), Action::Render],
+        KeyCode::Down => vec![Action::ScrollDown(2), Action::Render],
+        KeyCode::PageUp => vec![Action::ScrollUp(10), Action::Render],
+        KeyCode::PageDown => vec![Action::ScrollDown(10), Action::Render],
+        KeyCode::Home => vec![Action::ScrollToTop, Action::Render],
+        KeyCode::End => vec![Action::ScrollToBottom, Action::Render],
+        _ => {
+          let prev = self.log_search_input.value().to_owned();
+          self.log_search_input.handle_event(&crossterm::event::Event::Key(key));
+          if prev != self.log_search_input.value() {
+            self.logs_scroll_offset = 0;
+            self.follow_logs = self.log_search_input.value().is_empty() && self.log_order == LogOrder::OldestFirst;
+          }
+          vec![Action::Render]
+        },
+      },
       Mode::CommandPalette => unreachable!("command palette keys are handled before global shortcuts"),
     }
   }
@@ -1478,6 +1524,21 @@ impl Component for Home {
     if self.mode == Mode::Error || self.mode == Mode::UnitExplanation {
       return match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => vec![Action::EnterMode(Mode::ServiceList)],
+        _ => vec![],
+      };
+    }
+
+    if self.mode == Mode::LogSearch {
+      return match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+          if self.log_search_panel.contains(pos) {
+            vec![]
+          } else {
+            vec![Action::EnterMode(Mode::ServiceList)]
+          }
+        },
+        MouseEventKind::ScrollUp => vec![Action::ScrollUp(2), Action::Render],
+        MouseEventKind::ScrollDown => vec![Action::ScrollDown(2), Action::Render],
         _ => vec![],
       };
     }
@@ -1661,6 +1722,9 @@ impl Component for Home {
         }
         if self.search_panel.contains(pos) && self.mode == Mode::ServiceList {
           return vec![Action::EnterMode(Mode::Search)];
+        }
+        if self.log_search_panel.contains(pos) && matches!(self.mode, Mode::ServiceList | Mode::Search) {
+          return vec![Action::EnterMode(Mode::LogSearch)];
         }
         if self.services_panel.contains(pos) && matches!(self.mode, Mode::ServiceList | Mode::Search) {
           let inner = self.services_panel.inner(Margin::new(1, 1));
@@ -2406,51 +2470,168 @@ impl Component for Home {
       f.render_widget(Paragraph::new(stat_values), panes[4]);
     }
 
+    let is_searching_logs = self.mode == Mode::LogSearch;
+    let log_query = self.log_search_input.value().trim();
+    let has_log_filter = !log_query.is_empty();
+    let show_search_bar = is_searching_logs || has_log_filter;
+
+    let (search_rect, logs_content_rect) = if show_search_bar && logs_panel.height >= 6 {
+      let chunks = Layout::new(Direction::Vertical, [Constraint::Length(3), Constraint::Min(1)]).split(logs_panel);
+      (chunks[0], chunks[1])
+    } else {
+      (Rect::default(), logs_panel)
+    };
+    self.log_search_panel = search_rect;
+
+    let total_entries = self.logs.len();
+    let log_query_lower = log_query.to_lowercase();
+    let match_style = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+
     let logs: Box<dyn Iterator<Item = &LogEntry>> = match self.log_order {
       LogOrder::NewestFirst => Box::new(self.logs.iter().rev()),
       LogOrder::OldestFirst => Box::new(self.logs.iter()),
     };
-    let log_lines = logs
-      .map(|entry| {
-        // Colorize by syslog priority, like journalctl does in a terminal:
-        // err and worse red, warnings yellow, debug dimmed.
-        let content_style = match entry.priority {
-          Some(p) if p <= 3 => Style::default().fg(Color::Red),
-          Some(4) => Style::default().fg(Color::Yellow),
-          Some(7) => Style::default().add_modifier(Modifier::DIM),
-          _ => Style::default(),
-        };
-        match &entry.timestamp {
-          Some(timestamp) => Line::from(vec![
-            Span::styled(timestamp.as_str(), Style::default().add_modifier(Modifier::DIM)),
-            Span::raw(" "),
-            Span::styled(entry.content.as_str(), content_style),
-          ]),
-          None => Line::from(Span::styled(entry.content.as_str(), content_style)),
-        }
-      })
-      .collect_vec();
+
+    let (mut log_lines, matching_count): (Vec<Line>, usize) = if has_log_filter {
+      let mut matches = 0;
+      let lines = logs
+        .filter(|entry| {
+          let content_match = entry.content.to_lowercase().contains(&log_query_lower);
+          let ts_match = entry.timestamp.as_deref().unwrap_or("").to_lowercase().contains(&log_query_lower);
+          content_match || ts_match
+        })
+        .map(|entry| {
+          matches += 1;
+          let content_style = match entry.priority {
+            Some(p) if p <= 3 => Style::default().fg(Color::Red),
+            Some(4) => Style::default().fg(Color::Yellow),
+            Some(7) => Style::default().add_modifier(Modifier::DIM),
+            _ => Style::default(),
+          };
+          let content_spans = highlight_matches(&entry.content, log_query, content_style, match_style);
+          match &entry.timestamp {
+            Some(timestamp) => {
+              let mut spans = highlight_matches(
+                timestamp.as_str(),
+                log_query,
+                Style::default().add_modifier(Modifier::DIM),
+                match_style,
+              );
+              spans.push(Span::raw(" "));
+              spans.extend(content_spans);
+              Line::from(spans)
+            },
+            None => Line::from(content_spans),
+          }
+        })
+        .collect();
+      (lines, matches)
+    } else {
+      let lines = logs
+        .map(|entry| {
+          let content_style = match entry.priority {
+            Some(p) if p <= 3 => Style::default().fg(Color::Red),
+            Some(4) => Style::default().fg(Color::Yellow),
+            Some(7) => Style::default().add_modifier(Modifier::DIM),
+            _ => Style::default(),
+          };
+          match &entry.timestamp {
+            Some(timestamp) => Line::from(vec![
+              Span::styled(timestamp.as_str(), Style::default().add_modifier(Modifier::DIM)),
+              Span::raw(" "),
+              Span::styled(entry.content.as_str(), content_style),
+            ]),
+            None => Line::from(Span::styled(entry.content.as_str(), content_style)),
+          }
+        })
+        .collect();
+      (lines, total_entries)
+    };
+
+    if has_log_filter && matching_count == 0 {
+      log_lines.push(Line::from(vec![
+        Span::styled(format!("No logs matching \"{log_query}\""), Style::default().fg(Color::Yellow)),
+        Span::raw(" — press "),
+        Span::styled("Esc", Style::default().fg(theme.kbd).add_modifier(Modifier::BOLD)),
+        Span::raw(" to clear filter"),
+      ]));
+    }
+
+    if show_search_bar && search_rect.height > 0 {
+      let mut title_spans = vec![
+        Span::raw("Filter logs "),
+        Span::styled("(", Style::default().fg(theme.muted_alt)),
+        Span::styled("s", Style::default().add_modifier(Modifier::BOLD).fg(theme.kbd)),
+        Span::styled(" or ", Style::default().fg(theme.muted_alt)),
+        Span::styled("ctrl+s", Style::default().add_modifier(Modifier::BOLD).fg(theme.kbd)),
+        Span::styled(")", Style::default().fg(theme.muted_alt)),
+      ];
+      if has_log_filter {
+        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(
+          format!("[{matching_count}/{total_entries}]"),
+          Style::default().fg(if matching_count > 0 { theme.accent } else { Color::Red }).add_modifier(Modifier::BOLD),
+        ));
+      }
+
+      let width = search_rect.width.max(3) - 3;
+      let scroll = self.log_search_input.visual_scroll(width as usize);
+      let search_input_widget = Paragraph::new(self.log_search_input.value())
+        .style(if is_searching_logs { Style::default().fg(theme.accent) } else { Style::default() })
+        .scroll((0, scroll as u16))
+        .block(
+          Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(if is_searching_logs {
+              Style::default().fg(theme.accent)
+            } else {
+              Style::default().fg(theme.muted)
+            })
+            .title(block_title(Line::from(title_spans))),
+        );
+      f.render_widget(search_input_widget, search_rect);
+
+      let log_hint_width = 24;
+      if search_rect.width >= log_hint_width + 2 && search_rect.height > 0 {
+        let hint_area = Rect::new(search_rect.right() - log_hint_width - 2, search_rect.y, log_hint_width, 1);
+        f.render_widget(Clear, hint_area);
+        let hint_text = Paragraph::new(Line::from(vec![
+          Span::raw(" Press "),
+          Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD).fg(theme.kbd)),
+          Span::raw(" to clear/exit "),
+        ]))
+        .style(Style::default().fg(theme.muted_alt));
+        f.render_widget(hint_text, hint_area);
+      }
+    }
+
+    if self.mode == Mode::LogSearch && search_rect.width > 2 && search_rect.height > 2 {
+      f.set_cursor_position((
+        (search_rect.x + 1 + self.log_search_input.cursor() as u16).min(search_rect.x + search_rect.width - 2),
+        search_rect.y + 1,
+      ));
+    }
 
     let order_label = match self.log_order {
       LogOrder::NewestFirst => "newest first",
       LogOrder::OldestFirst => "oldest first",
     };
     let logs_unit = selected_item.map(|selected| selected.unit.name.as_str()).unwrap_or("unit");
+    let logs_title = if has_log_filter {
+      format!("Logs — {logs_unit} [{matching_count} of {total_entries} matches; {order_label}; ctrl+r to reverse]")
+    } else {
+      format!("Logs — {logs_unit} [{order_label}; ctrl+r to reverse]")
+    };
+
     let paragraph = Paragraph::new(log_lines)
-      .block(
-        Block::default()
-          .title(block_title(format!("Logs — {logs_unit} [{order_label}; ctrl+r to reverse]")))
-          .borders(Borders::ALL)
-          .border_type(BorderType::Rounded),
-      )
+      .block(Block::default().title(block_title(logs_title)).borders(Borders::ALL).border_type(BorderType::Rounded))
       .style(Style::default())
       .wrap(Wrap { trim: true });
 
-    // line_count wraps at the given width but includes the block's border rows in its count,
-    // so wrap at the inner width and compare against the full panel height.
-    let inner_width = logs_panel.width.saturating_sub(2);
+    let inner_width = logs_content_rect.width.saturating_sub(2);
     let total_lines = u16::try_from(paragraph.line_count(inner_width)).unwrap_or(u16::MAX);
-    let max_offset = total_lines.saturating_sub(logs_panel.height);
+    let max_offset = total_lines.saturating_sub(logs_content_rect.height);
     self.logs_max_scroll_offset = max_offset;
     self.logs_scroll_offset = if self.log_order == LogOrder::OldestFirst && self.follow_logs {
       max_offset
@@ -2459,22 +2640,19 @@ impl Component for Home {
     };
 
     let paragraph = paragraph.scroll((self.logs_scroll_offset, 0));
-    f.render_widget(paragraph, logs_panel);
+    f.render_widget(paragraph, logs_content_rect);
 
     if max_offset > 0 {
-      let viewport_height = logs_panel.height.saturating_sub(2) as usize;
-      // ScrollbarState treats content_length - 1 as its maximum position, so describe the
-      // possible scroll offsets here rather than passing the paragraph's total height.
+      let viewport_height = logs_content_rect.height.saturating_sub(2) as usize;
       let scroll_positions = max_offset as usize + 1;
       let mut scrollbar_state = ScrollbarState::new(scroll_positions)
         .position(self.logs_scroll_offset as usize)
         .viewport_content_length(viewport_height);
       let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None);
-      f.render_stateful_widget(scrollbar, logs_panel.inner(Margin::new(0, 1)), &mut scrollbar_state);
+      f.render_stateful_widget(scrollbar, logs_content_rect.inner(Margin::new(0, 1)), &mut scrollbar_state);
     }
 
-    // Inner area of the logs panel (border-excluded), used for mouse hit-testing and selection.
-    self.logs_panel_inner = logs_panel.inner(Margin::new(1, 1));
+    self.logs_panel_inner = logs_content_rect.inner(Margin::new(1, 1));
 
     if let Some((anchor, cursor)) = self.logs_selection {
       let inner = self.logs_panel_inner;
@@ -2699,6 +2877,10 @@ impl Component for Home {
       Mode::CommandPalette => {
         Line::from(span("Run command: <enter> | Navigate: <up>/<down> | Close: <esc>", theme.primary))
       },
+      Mode::LogSearch => Line::from(span(
+        "Filter logs: type query | Navigate: <up>/<down> | Apply: <enter> | Clear: <esc>",
+        theme.primary,
+      )),
     };
 
     f.render_widget(help_line, help_rect);
@@ -3029,6 +3211,81 @@ fn template_logs_message(template: &str) -> String {
     "{template} is a unit template, not a running service. Logs belong to concrete instances such as {}.",
     template_instance_example(template)
   )
+}
+
+/// Highlights occurrences of `query` within `text`, ignoring case.
+/// Returns a sequence of spans preserving original text casing and characters,
+/// applying `match_style` to matching substrings and `base_style` to the rest.
+pub fn highlight_matches<'a>(text: &'a str, query: &str, base_style: Style, match_style: Style) -> Vec<Span<'a>> {
+  let query = query.trim();
+  if query.is_empty() || text.is_empty() {
+    return vec![Span::styled(text, base_style)];
+  }
+
+  let text_lower = text.to_lowercase();
+  let query_lower = query.to_lowercase();
+
+  let mut match_ranges: Vec<(usize, usize)> = Vec::new();
+
+  if text_lower.len() == text.len() {
+    let mut search_from = 0;
+    let mut ok = true;
+    while let Some(pos) = text_lower[search_from..].find(&query_lower) {
+      let start = search_from + pos;
+      let end = start + query_lower.len();
+      if text.is_char_boundary(start) && text.is_char_boundary(end) {
+        match_ranges.push((start, end));
+        search_from = end;
+      } else {
+        ok = false;
+        break;
+      }
+    }
+    if !ok {
+      match_ranges.clear();
+    }
+  }
+
+  if match_ranges.is_empty() && text_lower.contains(&query_lower) {
+    let q_chars: Vec<char> = query_lower.chars().collect();
+    let q_len = q_chars.len();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let num_chars = chars.len();
+    let mut i = 0;
+    while i + q_len <= num_chars {
+      let matches = (0..q_len).all(|k| {
+        let text_c = chars[i + k].1;
+        text_c.to_lowercase().eq(q_chars[k].to_lowercase())
+      });
+      if matches {
+        let byte_start = chars[i].0;
+        let byte_end = if i + q_len < num_chars { chars[i + q_len].0 } else { text.len() };
+        match_ranges.push((byte_start, byte_end));
+        i += q_len;
+      } else {
+        i += 1;
+      }
+    }
+  }
+
+  if match_ranges.is_empty() {
+    return vec![Span::styled(text, base_style)];
+  }
+
+  let mut spans = Vec::new();
+  let mut current_idx = 0;
+  for (start, end) in match_ranges {
+    if start > current_idx {
+      spans.push(Span::styled(&text[current_idx..start], base_style));
+    }
+    spans.push(Span::styled(&text[start..end], match_style));
+    current_idx = end;
+  }
+  if current_idx < text.len() {
+    spans.push(Span::styled(&text[current_idx..], base_style));
+  }
+
+  spans
 }
 
 #[cfg(test)]
@@ -3564,6 +3821,111 @@ mod tests {
     assert!(rendered.contains(&expected_absolute));
   }
 
+  #[test]
+  fn test_highlight_matches_exact_and_case_insensitive() {
+    let base = Style::default().fg(Color::White);
+    let highlight = Style::default().fg(Color::Black).bg(Color::Yellow);
+
+    // Empty query returns whole text in base style
+    let spans = highlight_matches("Hello world", "", base, highlight);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "Hello world");
+    assert_eq!(spans[0].style, base);
+
+    // No match returns whole text in base style
+    let spans = highlight_matches("Hello world", "foo", base, highlight);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "Hello world");
+    assert_eq!(spans[0].style, base);
+
+    // Single match preserves original casing
+    let spans = highlight_matches("Error: Connection Failed", "error", base, highlight);
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].content, "Error");
+    assert_eq!(spans[0].style, highlight);
+    assert_eq!(spans[1].content, ": Connection Failed");
+    assert_eq!(spans[1].style, base);
+
+    // Multiple matches in middle and end
+    let spans = highlight_matches("test and test again test", "test", base, highlight);
+    assert_eq!(spans.len(), 5);
+    assert_eq!(spans[0].content, "test");
+    assert_eq!(spans[0].style, highlight);
+    assert_eq!(spans[1].content, " and ");
+    assert_eq!(spans[1].style, base);
+    assert_eq!(spans[2].content, "test");
+    assert_eq!(spans[2].style, highlight);
+    assert_eq!(spans[3].content, " again ");
+    assert_eq!(spans[3].style, base);
+    assert_eq!(spans[4].content, "test");
+    assert_eq!(spans[4].style, highlight);
+  }
+
+  #[test]
+  fn log_search_filters_and_exports_logs() {
+    let mut home = Home::new(Scope::All, &[], LogOrder::OldestFirst);
+    home.logs = vec![
+      LogEntry { timestamp: Some("12:00:00".into()), content: "Service starting".into(), priority: Some(6) },
+      LogEntry { timestamp: Some("12:00:01".into()), content: "Error: failed to bind port".into(), priority: Some(3) },
+      LogEntry { timestamp: Some("12:00:02".into()), content: "Retrying connection".into(), priority: Some(4) },
+      LogEntry { timestamp: Some("12:00:03".into()), content: "Fatal ERROR in worker".into(), priority: Some(2) },
+    ];
+
+    // No filter: all 4 entries exported
+    assert_eq!(home.logs_for_pager().len(), 4);
+
+    // Filter by "error" (case-insensitive)
+    home.log_search_input = Input::default().with_value("error".into());
+    let filtered = home.logs_for_pager();
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered[0].contains("failed to bind port"));
+    assert!(filtered[1].contains("Fatal ERROR in worker"));
+
+    // Filter by timestamp
+    home.log_search_input = Input::default().with_value("12:00:02".into());
+    let filtered_ts = home.logs_for_pager();
+    assert_eq!(filtered_ts.len(), 1);
+    assert!(filtered_ts[0].contains("Retrying connection"));
+
+    // Filter with no matches
+    home.log_search_input = Input::default().with_value("nonexistent".into());
+    assert!(home.logs_for_pager().is_empty());
+  }
+
+  #[test]
+  fn log_search_key_navigation_and_mode_transitions() {
+    let mut home = Home::new(Scope::All, &[], LogOrder::NewestFirst);
+    home.mode = Mode::ServiceList;
+
+    // Pressing 's' enters LogSearch
+    let actions = home.handle_key_events(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+    assert!(matches!(actions.as_slice(), [Action::EnterMode(Mode::LogSearch)]));
+    home.dispatch(Action::EnterMode(Mode::LogSearch));
+    assert_eq!(home.mode, Mode::LogSearch);
+
+    // Typing query updates log_search_input
+    for ch in "error".chars() {
+      home.handle_key_events(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(home.log_search_input.value(), "error");
+
+    // Enter locks query and returns to ServiceList
+    let actions = home.handle_key_events(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(actions.as_slice(), [Action::EnterMode(Mode::ServiceList)]));
+    home.dispatch(Action::EnterMode(Mode::ServiceList));
+    assert_eq!(home.mode, Mode::ServiceList);
+    assert_eq!(home.log_search_input.value(), "error"); // query preserved
+
+    // Esc in ServiceList clears the log search query
+    let actions = home.handle_key_events(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(actions.as_slice(), [Action::Render]));
+    assert_eq!(home.log_search_input.value(), "");
+
+    // Ctrl+S enters LogSearch from any mode
+    let actions = home.handle_key_events(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert!(matches!(actions.as_slice(), [Action::EnterMode(Mode::LogSearch)]));
+  }
+
   mod snapshots {
     //! Snapshot tests of `Home`'s rendering, using `insta` + ratatui's `TestBackend`.
     //!
@@ -3751,6 +4113,37 @@ mod tests {
       let mut home = fixture();
       home.error_message = "Failed to connect to systemd:\nUnit dbus not found".to_string();
       home.mode = Mode::Error;
+      let terminal = render(&mut home, 120, 40);
+      insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn log_search_mode_with_query_and_highlights() {
+      let mut home = fixture();
+      home.logs = vec![
+        LogEntry {
+          timestamp: Some("2026-10-20 12:00:00".into()),
+          content: "cron[1234]: (CRON) STARTUP (fork)".into(),
+          priority: Some(6),
+        },
+        LogEntry {
+          timestamp: Some("2026-10-20 12:01:00".into()),
+          content: "cron[1234]: (root) CMD (/usr/bin/backup)".into(),
+          priority: Some(6),
+        },
+        LogEntry {
+          timestamp: Some("2026-10-20 12:01:05".into()),
+          content: "cron[1234]: (root) ERROR: backup exited with code 1".into(),
+          priority: Some(3),
+        },
+        LogEntry {
+          timestamp: Some("2026-10-20 12:02:00".into()),
+          content: "cron[1234]: (CRON) INFO (running jobs)".into(),
+          priority: Some(6),
+        },
+      ];
+      home.mode = Mode::LogSearch;
+      home.log_search_input = Input::default().with_value("error".into());
       let terminal = render(&mut home, 120, 40);
       insta::assert_snapshot!(terminal.backend());
     }

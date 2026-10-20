@@ -15,5 +15,5 @@ expression: terminal.backend()
 "│  Copy unit file path                c│"
 "│  Edit unit file                     e│"
 "│  Search units             Ctrl+F or /│"
-"│  Filter units                      F2│"
+"│  Filter / search logs     s or Ctrl+S│"
 "╰──────────────────────────────────────╯"
