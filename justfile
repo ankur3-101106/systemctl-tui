@@ -13,13 +13,6 @@ run:
 test:
     cargo test
 
-# The GUI is excluded from default-members (needs libgtk-4-dev), build/run it explicitly
-build-gui:
-    cargo build -p systemctl-gui
-
-run-gui:
-    cargo run -p systemctl-gui
-
 watch-tests:
     watchexec --exts=rs -- cargo test
 

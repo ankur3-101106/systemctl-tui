@@ -2,11 +2,10 @@ When testing systemctl-tui, run it in debug mode (i.e. do not specify `--release
 
 ## Repo layout
 
-This is a Cargo workspace with three crates:
+This is a Cargo workspace with two crates:
 
 - `crates/systemctl-ui-core` — shared systemd/journald/SSH plumbing, no UI dependencies
 - `crates/systemctl-tui` — the ratatui TUI (the main published binary)
-- `crates/systemctl-gui` — a GTK 4 GUI. Excluded from workspace default-members because it needs GTK system libraries (`libgtk-4-dev`); build it explicitly with `cargo build -p systemctl-gui`.
 
 A plain `cargo build`/`cargo test`/`cargo clippy` covers core + TUI only.
 

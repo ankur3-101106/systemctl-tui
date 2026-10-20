@@ -339,50 +339,6 @@ pub struct UnitRuntimeInfo {
   pub accuracy: Option<String>,
 }
 
-/// A coarse explanation of where systemd obtained a unit definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnitOrigin {
-  Local,
-  Vendor,
-  Runtime,
-  Generated,
-  Transient,
-  User,
-  Unknown,
-}
-
-/// Classify a unit using metadata returned by `systemctl show`.
-///
-/// `source_path` is used when `fragment_path` is empty, which is common for
-/// generated compatibility units. This intentionally describes provenance,
-/// not enablement state.
-pub fn classify_unit_origin(scope: UnitScope, fragment_path: &str, source_path: &str, transient: bool) -> UnitOrigin {
-  if transient {
-    return UnitOrigin::Transient;
-  }
-  if scope == UnitScope::User {
-    return UnitOrigin::User;
-  }
-
-  let path = if fragment_path.is_empty() { source_path } else { fragment_path };
-  if path.starts_with("/run/systemd/generator") {
-    UnitOrigin::Generated
-  } else if path.starts_with("/run/systemd/") {
-    UnitOrigin::Runtime
-  } else if path.starts_with("/etc/systemd/") || path.starts_with("/etc/init.d/") {
-    UnitOrigin::Local
-  } else if path.starts_with("/usr/lib/systemd/") || path.starts_with("/lib/systemd/") {
-    UnitOrigin::Vendor
-  } else {
-    UnitOrigin::Unknown
-  }
-}
-
-/// Classify a concrete unit using its on-demand runtime metadata.
-pub fn unit_origin(unit: &UnitWithStatus, info: &UnitRuntimeInfo) -> UnitOrigin {
-  classify_unit_origin(unit.scope, &info.fragment_path, &info.source_path, info.transient)
-}
-
 fn parse_timer_schedules(value: &str) -> Vec<String> {
   value
     .split(" }")
@@ -518,22 +474,6 @@ fn parse_timer_list_line(line: &str) -> Option<TimerListEntry> {
   let next_elapse = if placeholder(tokens.first()?) { None } else { timestamps.next() };
   let last_trigger = timestamps.next();
   Some(TimerListEntry { timer, next_elapse, last_trigger, activates })
-}
-
-/// Fetch all timers for a scope in one `systemctl list-timers` call, in systemd's
-/// order (soonest next trigger first, unscheduled timers last).
-pub fn get_timer_list(scope: UnitScope) -> Result<Vec<TimerListEntry>> {
-  let mut args = vec!["--quiet", "list-timers", "--all", "--no-legend", "--no-pager", "--full"];
-  if scope == UnitScope::User {
-    args.insert(0, "--user");
-  }
-
-  let output = ssh::host_command("systemctl", &args).output()?;
-  if !output.status.success() {
-    let stderr = String::from_utf8(output.stderr)?;
-    bail!(stderr);
-  }
-  Ok(str::from_utf8(&output.stdout)?.lines().filter_map(parse_timer_list_line).collect())
 }
 
 /// Parse the NEXT column from a single-unit `systemctl list-timers --no-legend` call.

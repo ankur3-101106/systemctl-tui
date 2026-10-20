@@ -1,4 +1,4 @@
-//! Pure formatting helpers shared by the TUI and GUI frontends.
+//! Pure formatting helpers.
 
 /// Parse a journalctl timestamp and return a formatted date string.
 ///
